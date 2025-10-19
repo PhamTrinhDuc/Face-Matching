@@ -8,3 +8,4 @@ torch==1.5.1
 torchvision==0.6.1
 tqdm==4.47.0
 retina-face==0.0.17
+tensorflow==2.11.0
