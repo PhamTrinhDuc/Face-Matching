@@ -5,10 +5,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 import numpy as np
 from pymilvus import Collection, connections, FieldSchema, CollectionSchema, DataType, utility, exceptions
 from typing import List, Dict, Any
-from utils.helpers import create_logger
-from source.base.base_vdb import BaseVectorDB
 
-class MilvusClient(BaseVectorDB): 
+class MilvusClient: 
   def __init__(self, host: str, port: str, collection_name: str):
     """
     Initialize Milvus client
@@ -20,29 +18,19 @@ class MilvusClient(BaseVectorDB):
     """
     super().__init__(host, port, collection_name)
     self.alias = "default"
-    self.logger = create_logger()
 
   def connect(self):
     try: 
-      connections.connect(alias=self.alias, host=self.host, port=self.port, )
-      self.logger.info(f"Connected to Milvus at {self.host}:{self.port}")
+      connections.connect(alias=self.alias, host=self.host, port=self.port)
+      print(f"Connected to Milvus at {self.host}:{self.port}")
       return True
     except exceptions.ConnectError as ce:
-      self.logger.error(f"Connection timeout or refused: {ce}")
+      print(f"Connection timeout or refused: {ce}")
       raise Exception(f"Connection timeout or refused: {ce}")
     except Exception as e: 
-      self.logger.error(f"Failed to connect to Milvus: {e}")
+      print(f"Failed to connect to Milvus: {e}")
       raise Exception(f"Failed to connect to Milvus: {e}")
     
-  def disconnect(self):
-    """Disconnect from Milvus server"""
-    try:
-      connections.disconnect(alias=self.alias)
-      self.logger.info("Disconnected from Milvus")
-    except Exception as e:
-      self.logger.error(f"Error disconnecting from Milvus: {e}")
-      raise Exception(f"Error disconnecting from Milvus: {e}")
-  
   def create_collection(self, dim: int=512, description:str="Image embeddings collection"):
     """
     Create a collection for storing image embeddings
@@ -53,7 +41,7 @@ class MilvusClient(BaseVectorDB):
     """
     try: 
       if utility.has_collection(self.collection_name):
-          self.logger.warning(f"Collection '{self.collection_name}' already exists. Reloading it")
+          print(f"Collection '{self.collection_name}' already exists. Reloading it")
           self.collection = Collection(self.collection_name)
           return
 
@@ -73,9 +61,9 @@ class MilvusClient(BaseVectorDB):
       }
 
       self.collection.create_index(field_name="embedding", index_params=index_params)
-      self.logger.info(f"Collection '{self.collection_name}' created successfully")
+      print(f"Collection '{self.collection_name}' created successfully")
     except Exception as e:
-      self.logger.error(f"Failed to create collection: {e}")
+      print(f"Failed to create collection: {e}")
       raise
 
   def load_collection(self):
@@ -84,9 +72,9 @@ class MilvusClient(BaseVectorDB):
       if not self.collection:
           self.collection = Collection(self.collection_name)
       self.collection.load()
-      self.logger.info(f"Collection '{self.collection_name}' loaded into memory")
+      print(f"Collection '{self.collection_name}' loaded into memory")
     except Exception as e:
-        self.logger.error(f"Failed to load collection: {e}")
+        print(f"Failed to load collection: {e}")
         raise
     
   def insert_embeddings(self, image_paths: List[str], embeddings: np.ndarray, metadata = None):
@@ -114,11 +102,11 @@ class MilvusClient(BaseVectorDB):
       mr = self.collection.insert(data=data)
       self.collection.flush()
 
-      self.logger.info(f"Inserted {len(image_paths)} embeddings")
+      print(f"Inserted {len(image_paths)} embeddings")
       return mr.primary_keys
             
     except Exception as e:
-        self.logger.error(f"Failed to insert embeddings: {e}")
+        print(f"Failed to insert embeddings: {e}")
         raise
     
   def search_similar(self, 
@@ -160,11 +148,11 @@ class MilvusClient(BaseVectorDB):
               "schema": hit.entity.get("schema")  # Fixed: "metadata" -> "schema"
           })
       
-      self.logger.info(f"Found {len(formatted_results)} similar images")
+      print(f"Found {len(formatted_results)} similar images")
       return formatted_results
       
     except Exception as e:
-        self.logger.error(f"Failed to search similar images: {e}")
+        print(f"Failed to search similar images: {e}")
         raise
       
   def delete_by_ids(self, ids: List[int]):
@@ -173,9 +161,9 @@ class MilvusClient(BaseVectorDB):
       expr = f"id in {ids}"
       self.collection.delete(expr)
       self.collection.flush()
-      self.logger.info(f"Deleted {len(ids)} embeddings")
+      print(f"Deleted {len(ids)} embeddings")
     except Exception as e:
-      self.logger.error(f"Failed to delete embeddings: {e}")
+      print(f"Failed to delete embeddings: {e}")
       raise
   
   def get_embedding_by_id(self, id: int): 
@@ -185,10 +173,10 @@ class MilvusClient(BaseVectorDB):
           if results:
               return np.array(results[0]["embedding"])
           else:
-              self.logger.warning(f"No embedding found for ID {id}")
+              print(f"No embedding found for ID {id}")
               return None
       except Exception as e:
-          self.logger.error(f"Failed to get embedding by ID: {e}")
+          print(f"Failed to get embedding by ID: {e}")
           raise
 
   def get_collection_stats(self) -> Dict[str, Any]:
@@ -230,7 +218,7 @@ class MilvusClient(BaseVectorDB):
       return collection_info
       
     except Exception as e:
-      self.logger.error(f"Failed to get collection stats: {e}")
+      print(f"Failed to get collection stats: {e}")
       return {
           "num_entities": 0,
           "collection_name": self.collection_name,
@@ -241,19 +229,28 @@ class MilvusClient(BaseVectorDB):
     """Drop the collection"""
     try:
       utility.drop_collection(self.collection_name)
-      self.logger.info(f"Collection '{self.collection_name}' dropped")
+      print(f"Collection '{self.collection_name}' dropped")
     except Exception as e:
-      self.logger.error(f"Failed to drop collection: {e}")
+      print(f"Failed to drop collection: {e}")
       raise
   
+  def disconnect(self):
+    """Disconnect from Milvus server"""
+    try:
+      connections.disconnect(alias=self.alias)
+      print("Disconnected from Milvus")
+    except Exception as e:
+      print(f"Error disconnecting from Milvus: {e}")
+      raise Exception(f"Error disconnecting from Milvus: {e}")
+
   def list_collections(self) -> List[str]:
     """List all collections in Milvus"""
     try:
       collections = utility.list_collections()
-      self.logger.info(f"Found {len(collections)} collections")
+      print(f"Found {len(collections)} collections")
       return collections
     except Exception as e:
-      self.logger.error(f"Failed to list collections: {e}")
+      print(f"Failed to list collections: {e}")
       return []
     
   def __enter__(self):
@@ -265,6 +262,10 @@ class MilvusClient(BaseVectorDB):
     """Context manager exit"""
     self.disconnect()
 
-
-
-    
+if __name__ == "__main__": 
+   client = MilvusClient(host="localhost", port=19530, collection_name="iot_face_matching")
+   client.connect()
+   client.create_collection()
+   client.load_collection()
+   result = client.search_similar()
+   
