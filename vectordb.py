@@ -16,8 +16,11 @@ class MilvusClient:
         port: Milvus server port  
         collection_name: Name of the collection to work with
     """
-    super().__init__(host, port, collection_name)
+    self.host = host
+    self.port = port
+    self.collection_name = collection_name
     self.alias = "default"
+    self.collection = None
 
   def connect(self):
     try: 
@@ -31,31 +34,64 @@ class MilvusClient:
       print(f"Failed to connect to Milvus: {e}")
       raise Exception(f"Failed to connect to Milvus: {e}")
     
-  def create_collection(self, dim: int=512, description:str="Image embeddings collection"):
+  def create_collection(self, dim: int=512, description:str="Student face embeddings collection"):
     """
-    Create a collection for storing image embeddings
+    Create a collection for storing student face embeddings
     
     Args:
-        dim: Dimension of the embedding vectors
+        dim: Dimension of the embedding vectors (default: 512)
         description: Collection description
     """
     try: 
       if utility.has_collection(self.collection_name):
-          print(f"Collection '{self.collection_name}' already exists. Reloading it")
+          print(f"Collection '{self.collection_name}' already exists. Checking index...")
           self.collection = Collection(self.collection_name)
-          return
+          
+          # Check if index exists and is compatible
+          try:
+              indexes = self.collection.indexes
+              has_valid_index = False
+              
+              for index in indexes:
+                  if index.field_name == "embedding":
+                      print(f"Found existing index on embedding field")
+                      has_valid_index = True
+                      break
+              
+              if not has_valid_index:
+                  print("No valid index found. Creating new index...")
+                  index_params = {
+                      "metric_type": "IP",
+                      "index_type": "IVF_FLAT", 
+                      "params": {"nlist": 128}
+                  }
+                  self.collection.create_index(field_name="embedding", index_params=index_params)
+                  print("Index created successfully")
+              
+              # Try to load the collection
+              self.collection.load()
+              print(f"Collection '{self.collection_name}' loaded successfully")
+              return
+              
+          except Exception as index_error:
+              print(f"Error with existing collection: {index_error}")
+              print("Dropping and recreating collection...")
+              utility.drop_collection(self.collection_name)
+              # Continue to create new collection below
 
+      # Define schema fields for student faces
       fields = [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True), 
-        FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=500), 
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim), 
-        FieldSchema(name="schema", dtype=DataType.VARCHAR, max_length=1000)
+        FieldSchema(name="student_id", dtype=DataType.VARCHAR, max_length=50),  # Student ID
+        FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=500),  # Image file path
+        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim),     # Face embedding vector
+        FieldSchema(name="metadata", dtype=DataType.VARCHAR, max_length=1000)   # Additional metadata (JSON string)
       ]
       schema = CollectionSchema(fields=fields, description=description)
       self.collection = Collection(name=self.collection_name, schema=schema)
 
       index_params = {
-        "metric_type": "COSINE",  # Changed from L2 to COSINE
+        "metric_type": "IP",  # Inner Product for cosine similarity (after normalization)
         "index_type": "IVF_FLAT", 
         "params": {"nlist": 128}
       }
@@ -77,84 +113,103 @@ class MilvusClient:
         print(f"Failed to load collection: {e}")
         raise
     
-  def insert_embeddings(self, image_paths: List[str], embeddings: np.ndarray, metadata = None):
+  def insert_student_embedding(self, 
+                             student_id: str, 
+                             image_path: str, 
+                             embedding: np.ndarray, 
+                             metadata: str = None) -> List[int]:
     """
-    Insert image embeddings into collection
+    Insert student face embedding into collection
     
     Args:
-        image_paths: List of image file paths
-        embeddings: Numpy array of embeddings
-        metadata: Optional metadata for each image
+        student_id: Student ID
+        image_path: Path to student image file
+        embedding: Face embedding vector (numpy array)
+        metadata: Additional metadata as JSON string
         
     Returns:
         List of inserted IDs
     """
-    try: 
-      if metadata is None: 
-        metadata = [""] * len(image_paths)
-
+    try:
+      # Ensure embedding is 1D and float32
+      if len(embedding.shape) == 2:
+          embedding = embedding.flatten()
+      embedding = embedding.astype(np.float32)
+      
+      # Prepare data for insertion
+      # Format: list of [list_for_field1, list_for_field2, ...]
       data = [
-        image_paths, 
-        embeddings.tolist(), 
-        metadata
+          [str(student_id)],           # student_id field
+          [str(image_path)],           # image_path field  
+          [embedding.tolist()],        # embedding field - list of one embedding vector
+          [str(metadata or "")]        # metadata field
       ]
-
-      mr = self.collection.insert(data=data)
-      self.collection.flush()
-
-      print(f"Inserted {len(image_paths)} embeddings")
+      
+      # Insert data
+      mr = self.collection.insert(data)
+      
+      print(f"Successfully inserted embedding for student {student_id}")
       return mr.primary_keys
-            
+      
     except Exception as e:
-        print(f"Failed to insert embeddings: {e}")
-        raise
-    
-  def search_similar(self, 
-                     query_embedding: np.ndarray, 
-                     top_k: int = 10, 
-                     search_params: Dict = None) -> List[Dict]:
+        print(f"Error inserting student embedding: {e}")
+        raise e
+
+  def search_similar_students(self, 
+                            query_embedding: np.ndarray, 
+                            top_k: int = 5, 
+                            search_params: Dict = None) -> List[Dict]:
     """
-    Search for similar images
+    Search for similar student faces
     
     Args:
-        query_embedding: Query embedding vector
-        top_k: Number of similar images to return
-        search_params: Search parameters
+        query_embedding: Query face embedding vector
+        top_k: Number of similar faces to return (default: 5)
+        search_params: Search parameters for Milvus
         
     Returns:
-        List of search results with scores and metadata
+        List of search results with student info and similarity scores
     """
     try:
-      if search_params is None:
-          search_params = {"metric_type": "COSINE", "params": {"nprobe": 10}}
+      # Ensure embedding is 2D
+      if len(query_embedding.shape) == 1:
+          query_embedding = query_embedding.reshape(1, -1)
       
+      # Default search parameters
+      if search_params is None:
+          search_params = {
+              "metric_type": "IP",
+              "params": {"nprobe": 16}
+          }
+      
+      # Perform search
       results = self.collection.search(
-          data=[query_embedding.tolist()],
+          data=query_embedding.tolist(),
           anns_field="embedding",
           param=search_params,
           limit=top_k,
-          output_fields=["image_path", "schema"]  # Fixed: "metadata" -> "schema" to match your field definition
+          output_fields=["student_id", "image_path", "metadata"]
       )
       
       # Format results
       formatted_results = []
-      for hits in results:
-        for hit in hits:
-          formatted_results.append({
-              "id": hit.id,
-              "distance": hit.distance,
-              "score": hit.score,
-              "image_path": hit.entity.get("image_path"),
-              "schema": hit.entity.get("schema")  # Fixed: "metadata" -> "schema"
-          })
+      if results and len(results) > 0:
+          for hit in results[0]:  # results[0] for first query
+              formatted_results.append({
+                  "id": hit.id,
+                  "student_id": hit.entity.get("student_id"),
+                  "image_path": hit.entity.get("image_path"), 
+                  "metadata": hit.entity.get("metadata"),
+                  "distance": hit.distance,  # Cosine similarity score
+                  "confidence": float(hit.distance)  # Alias for distance
+              })
       
-      print(f"Found {len(formatted_results)} similar images")
       return formatted_results
       
     except Exception as e:
-        print(f"Failed to search similar images: {e}")
-        raise
-      
+        print(f"Error searching similar students: {e}")
+        return []
+   
   def delete_by_ids(self, ids: List[int]):
     """Delete embeddings by IDs"""
     try:
@@ -233,6 +288,19 @@ class MilvusClient:
     except Exception as e:
       print(f"Failed to drop collection: {e}")
       raise
+
+  def recreate_collection(self, dim: int=512, description:str="Student face embeddings collection"):
+    """Force drop and recreate collection"""
+    try:
+      if utility.has_collection(self.collection_name):
+          print(f"Dropping existing collection '{self.collection_name}'...")
+          utility.drop_collection(self.collection_name)
+      
+      self.create_collection(dim, description)
+      print(f"Collection '{self.collection_name}' recreated successfully")
+    except Exception as e:
+      print(f"Failed to recreate collection: {e}")
+      raise
   
   def disconnect(self):
     """Disconnect from Milvus server"""
@@ -263,9 +331,10 @@ class MilvusClient:
     self.disconnect()
 
 if __name__ == "__main__": 
-   client = MilvusClient(host="localhost", port=19530, collection_name="iot_face_matching")
+   client = MilvusClient(host="localhost", port=19530, collection_name="student_faces")
    client.connect()
-   client.create_collection()
-   client.load_collection()
-   result = client.search_similar()
+   client.drop_collection()
+  #  client.create_collection()
+  #  client.load_collection()
+  #  result = client.search_similar()
    

@@ -13,3 +13,6 @@ minio==7.2.7
 fastapi==0.103.2
 uvicorn[standard]==0.22.0
 python-multipart==0.0.8
+pydantic==2.4.2
+sqlalchemy==1.4.39
+alembic==1.8.1

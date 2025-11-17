@@ -2,6 +2,9 @@
 # https://github.com/ZhaoJ9014/face.evoLVe.PyTorch/blob/master/util/extract_feature_v1.py
 
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 from typing import Union, List, Tuple, Optional
 from pathlib import Path
 
