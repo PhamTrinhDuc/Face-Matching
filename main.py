@@ -3,21 +3,20 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 import io
-import numpy as np
 from PIL import Image
 import tempfile
-from datetime import datetime
 from typing import Optional, Dict, List
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from face_embedder import FaceEmbedder
-from face_detector import cropper
+from face_detector import cropper_yunet, cropper_medipipe
 from vectordb import MilvusClient
 from models.database import get_db, create_tables, Student
 from models.student_service import StudentService, create_student_service
+
 
 app = FastAPI(
     title="Face Matching System",
@@ -146,18 +145,27 @@ async def register_student_face(
         
         try:
             # Detect and crop face
-            cropped_face = cropper(temp_path)
+            cropped_face = cropper_yunet(temp_path)
             if cropped_face is None:
                 return RegisterResponse(
                     success=False,
                     message="No face detected in the image. Please upload a clear face image."
                 )
             
-            # Extract embedding from the original image
-            embedding = embedder.embed_single_image(image)
+            # Extract embedding from the CROPPED face (not original image)
+            # This ensures consistency with verification step
+            embedding = embedder.embed_single_image(cropped_face)
             
             # Use StudentService to handle database operations
             with create_student_service() as service:
+                student = service.get_student_by_code(student_code)
+                if student: 
+                    return RegisterResponse(
+                        success=False,
+                        message=f"Student with code {student_code} already registered.",
+                        student_id=student.student_id,
+                        db_id=student.id
+                    )
                 # Create student record in database first (student_id will be auto-generated)
                 student = service.create_student(
                     full_name=full_name,
@@ -212,7 +220,7 @@ async def register_student_face(
 @app.post("/verify", response_model=VerifyResponse)
 async def verify_student_face(
     file: UploadFile = File(...),
-    threshold: float = Form(0.7)
+    threshold: float = Form(0.3)
 ):
     """
     Kiểm tra khuôn mặt sinh viên với cơ sở dữ liệu
@@ -243,7 +251,7 @@ async def verify_student_face(
         
         try:
             # Detect face
-            cropped_face = cropper(temp_path)
+            cropped_face = cropper_yunet(temp_path)
             if cropped_face is None:
                 return VerifyResponse(
                     success=False,
@@ -252,7 +260,7 @@ async def verify_student_face(
                 )
             
             # Extract embedding
-            query_embedding = embedder.embed_single_image(image)
+            query_embedding = embedder.embed_single_image(cropped_face)
             
             # Search for similar faces in Milvus
             similar_faces = milvus_client.search_similar_students(
@@ -314,6 +322,106 @@ async def verify_student_face(
             message=f"Verification failed: {str(e)}"
         )
 
+@app.post("/verify/raw", response_model=VerifyResponse)
+async def verify_student_face_raw(
+    request: Request,
+    threshold: float = 0.7
+):
+    """
+    Endpoint cho ESP32-CAM gửi ảnh binary thẳng
+    Gửi: Content-Type: image/jpeg + threshold trong query param
+    """
+    try:
+        # Đọc raw image data
+        image_data = await request.body()
+        
+        if not image_data:
+            return VerifyResponse(
+                success=False,
+                matched=False,
+                message="No image data received."
+            )
+        
+        image = Image.open(io.BytesIO(image_data)).convert('RGB')
+        
+        # Save temporary file for face detection
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+            image.save(temp_file.name)
+            temp_path = temp_file.name
+        
+        try:
+            # Detect face
+            cropped_face = cropper_yunet(temp_path)
+            if cropped_face is None:
+                return VerifyResponse(
+                    success=False,
+                    matched=False,
+                    message="No face detected in the image. Please upload a clear face image."
+                )
+            
+            # Extract embedding
+            query_embedding = embedder.embed_single_image(cropped_face)
+            
+            # Search for similar faces in Milvus
+            similar_faces = milvus_client.search_similar_students(
+                query_embedding=query_embedding,
+                top_k=5,
+                search_params={"metric_type": "IP", "params": {"nprobe": 10}}
+            )
+            
+            if not similar_faces:
+                return VerifyResponse(
+                    success=True,
+                    matched=False,
+                    message="No matching face found in database.",
+                    similar_faces=[]
+                )
+            
+            # Check if best match exceeds threshold
+            best_match = similar_faces[0]
+            confidence = best_match.get('distance', 0.0)  # Cosine similarity score
+            matched_student_id = best_match.get('student_id')
+            
+            # Get student details from database
+            student_name = None
+            with create_student_service() as service:
+                if matched_student_id:
+                    student = service.get_student_by_id(matched_student_id)
+                    if student:
+                        student_name = student.full_name
+            
+            if confidence >= threshold:
+                return VerifyResponse(
+                    success=True,
+                    matched=True,
+                    message=f"Face matched successfully! Welcome {student_name or matched_student_id}",
+                    student_id=matched_student_id,
+                    student_name=student_name,
+                    confidence=confidence,
+                    similar_faces=similar_faces[:3]  # Return top 3 matches
+                )
+            else:
+                return VerifyResponse(
+                    success=True,
+                    matched=False,
+                    message=f"Face not matched. Confidence {confidence:.3f} below threshold {threshold}.",
+                    confidence=confidence,
+                    similar_faces=similar_faces[:3]
+                )
+                
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+                
+    except Exception as e:
+        print(f"Error in verify_student_face: {e}")
+        return VerifyResponse(
+            success=False,
+            matched=False,
+            message=f"Verification failed: {str(e)}"
+        )
+    
 @app.get("/students")
 async def list_registered_students(student_code_filter: Optional[str] = None):
     """

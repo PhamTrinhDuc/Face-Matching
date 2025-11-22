@@ -60,6 +60,12 @@ class StudentService:
         
         return student
     
+    def get_student_by_code(self, student_code: str) -> Optional[Student]:
+        """Get student by student ID"""
+        return self.db.query(Student).filter(
+            Student.student_code == student_code
+        ).first()
+    
     def get_student_by_id(self, student_id: str) -> Optional[Student]:
         """Get student by student ID"""
         return self.db.query(Student).filter(
